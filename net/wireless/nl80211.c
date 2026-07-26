@@ -5271,6 +5271,8 @@ static int _nl80211_new_interface(struct sk_buff *skb, struct genl_info *info)
 	struct vif_params params;
 	struct wireless_dev *wdev;
 	struct sk_buff *msg;
+	char *ifname;
+	bool mac_diag;
 	u32 radio_mask;
 	int err;
 	enum nl80211_iftype type = NL80211_IFTYPE_UNSPECIFIED;
@@ -5280,8 +5282,16 @@ static int _nl80211_new_interface(struct sk_buff *skb, struct genl_info *info)
 	if (!info->attrs[NL80211_ATTR_IFNAME])
 		return -EINVAL;
 
+	ifname = nla_data(info->attrs[NL80211_ATTR_IFNAME]);
+	mac_diag = !strcmp(ifname, "wlan0") || !strcmp(ifname, "wlan1");
+
 	if (info->attrs[NL80211_ATTR_IFTYPE])
 		type = nla_get_u32(info->attrs[NL80211_ATTR_IFTYPE]);
+
+	if (mac_diag)
+		pr_info("wlan-mac-diag: new-interface request name=%s type=%d mac-attr=%d mac-on-create=%d\n",
+			ifname, type, !!info->attrs[NL80211_ATTR_MAC],
+			!!(rdev->wiphy.features & NL80211_FEATURE_MAC_ON_CREATE));
 
 	if (!rdev->ops->add_virtual_intf)
 		return -EOPNOTSUPP;
@@ -5292,8 +5302,20 @@ static int _nl80211_new_interface(struct sk_buff *skb, struct genl_info *info)
 	    info->attrs[NL80211_ATTR_MAC]) {
 		nla_memcpy(params.macaddr, info->attrs[NL80211_ATTR_MAC],
 			   ETH_ALEN);
-		if (!is_valid_ether_addr(params.macaddr))
+		if (mac_diag)
+			pr_info("wlan-mac-diag: new-interface name=%s branch=mac-attr value=%pM valid=%d zero=%d\n",
+				ifname, params.macaddr,
+				is_valid_ether_addr(params.macaddr),
+				is_zero_ether_addr(params.macaddr));
+		if (!is_valid_ether_addr(params.macaddr)) {
+			if (mac_diag)
+				pr_err("wlan-mac-diag: new-interface name=%s branch=reject-invalid-mac\n",
+				       ifname);
 			return -EADDRNOTAVAIL;
+		}
+	} else if (mac_diag) {
+		pr_info("wlan-mac-diag: new-interface name=%s branch=no-mac-attr\n",
+			ifname);
 	}
 
 	if (info->attrs[NL80211_ATTR_4ADDR]) {
@@ -5319,15 +5341,26 @@ static int _nl80211_new_interface(struct sk_buff *skb, struct genl_info *info)
 		return -ENOMEM;
 
 	wdev = rdev_add_virtual_intf(rdev,
-				nla_data(info->attrs[NL80211_ATTR_IFNAME]),
+				ifname,
 				NET_NAME_USER, type, &params);
 	if (WARN_ON(!wdev)) {
+		if (mac_diag)
+			pr_err("wlan-mac-diag: new-interface name=%s branch=null-wdev\n",
+			       ifname);
 		nlmsg_free(msg);
 		return -EPROTO;
 	} else if (IS_ERR(wdev)) {
+		if (mac_diag)
+			pr_err("wlan-mac-diag: new-interface name=%s branch=driver-error err=%ld\n",
+			       ifname, PTR_ERR(wdev));
 		nlmsg_free(msg);
 		return PTR_ERR(wdev);
 	}
+
+	if (mac_diag && wdev->netdev)
+		pr_info("wlan-mac-diag: new-interface name=%s branch=driver-success dev=%pM perm=%pM zero=%d\n",
+			ifname, wdev->netdev->dev_addr, wdev->netdev->perm_addr,
+			is_zero_ether_addr(wdev->netdev->dev_addr));
 
 	if (info->attrs[NL80211_ATTR_SOCKET_OWNER])
 		wdev->owner_nlportid = info->snd_portid;

@@ -10215,25 +10215,61 @@ int netif_set_mac_address(struct net_device *dev, struct sockaddr_storage *ss,
 			  struct netlink_ext_ack *extack)
 {
 	const struct net_device_ops *ops = dev->netdev_ops;
+	bool mac_diag = !strcmp(dev->name, "wlan0") ||
+			!strcmp(dev->name, "wlan1");
 	int err;
 
-	if (!ops->ndo_set_mac_address)
+	if (mac_diag)
+		netdev_info(dev, "wlan-mac-diag: set entry old=%pM new=%pM present=%d valid=%d zero=%d\n",
+			    dev->dev_addr, ss->__data,
+			    netif_device_present(dev),
+			    is_valid_ether_addr(ss->__data),
+			    is_zero_ether_addr(ss->__data));
+
+	if (!ops->ndo_set_mac_address) {
+		if (mac_diag)
+			netdev_err(dev, "wlan-mac-diag: set-mac branch=no-ndo\n");
 		return -EOPNOTSUPP;
-	if (ss->ss_family != dev->type)
+	}
+	if (ss->ss_family != dev->type) {
+		if (mac_diag)
+			netdev_err(dev, "wlan-mac-diag: set-mac branch=family-mismatch family=%u type=%u\n",
+				   (unsigned int)ss->ss_family,
+				   (unsigned int)dev->type);
 		return -EINVAL;
-	if (!netif_device_present(dev))
+	}
+	if (!netif_device_present(dev)) {
+		if (mac_diag)
+			netdev_err(dev, "wlan-mac-diag: set-mac branch=device-not-present\n");
 		return -ENODEV;
+	}
 	err = netif_pre_changeaddr_notify(dev, ss->__data, extack);
-	if (err)
+	if (err) {
+		if (mac_diag)
+			netdev_err(dev, "wlan-mac-diag: set-mac branch=notifier-rejected err=%d\n",
+				   err);
 		return err;
+	}
 	if (memcmp(dev->dev_addr, ss->__data, dev->addr_len)) {
 		err = ops->ndo_set_mac_address(dev, ss);
-		if (err)
+		if (err) {
+			if (mac_diag)
+				netdev_err(dev, "wlan-mac-diag: set-mac branch=ndo-rejected err=%d current=%pM zero=%d\n",
+					   err, dev->dev_addr,
+					   is_zero_ether_addr(dev->dev_addr));
 			return err;
+		}
+	} else if (mac_diag) {
+		netdev_info(dev, "wlan-mac-diag: set-mac branch=unchanged value=%pM\n",
+			    dev->dev_addr);
 	}
 	dev->addr_assign_type = NET_ADDR_SET;
 	call_netdevice_notifiers(NETDEV_CHANGEADDR, dev);
 	add_device_randomness(dev->dev_addr, dev->addr_len);
+	if (mac_diag)
+		netdev_info(dev, "wlan-mac-diag: set-mac branch=success final=%pM valid=%d zero=%d\n",
+			    dev->dev_addr, is_valid_ether_addr(dev->dev_addr),
+			    is_zero_ether_addr(dev->dev_addr));
 	return 0;
 }
 

@@ -270,14 +270,26 @@ static int _ieee80211_change_mac(struct ieee80211_sub_if_data *sdata,
 {
 	struct ieee80211_local *local = sdata->local;
 	struct sockaddr *sa = addr;
+	bool mac_diag = !strcmp(sdata->name, "wlan0") ||
+			!strcmp(sdata->name, "wlan1");
 	bool check_dup = true;
 	bool live = false;
 	int ret;
 
+	if (mac_diag)
+		pr_info("wlan-mac-diag: change entry name=%s old=%pM new=%pM type=%d running=%d zero=%d\n",
+			sdata->name, sdata->dev->dev_addr, sa->sa_data,
+			sdata->vif.type, ieee80211_sdata_running(sdata),
+			is_zero_ether_addr(sa->sa_data));
+
 	if (ieee80211_sdata_running(sdata)) {
 		ret = ieee80211_can_powered_addr_change(sdata);
-		if (ret)
+		if (ret) {
+			if (mac_diag)
+				pr_err("wlan-mac-diag: change-mac name=%s branch=powered-change-rejected err=%d\n",
+				       sdata->name, ret);
 			return ret;
+		}
 
 		live = true;
 	}
@@ -287,8 +299,12 @@ static int _ieee80211_change_mac(struct ieee80211_sub_if_data *sdata,
 		check_dup = false;
 
 	ret = ieee80211_verify_mac(sdata, sa->sa_data, check_dup);
-	if (ret)
+	if (ret) {
+		if (mac_diag)
+			pr_err("wlan-mac-diag: change-mac name=%s branch=verify-rejected check-dup=%d err=%d\n",
+			       sdata->name, check_dup, ret);
 		return ret;
+	}
 
 	if (live)
 		drv_remove_interface(local, sdata);
@@ -304,6 +320,11 @@ static int _ieee80211_change_mac(struct ieee80211_sub_if_data *sdata,
 	 */
 	if (live)
 		WARN_ON(drv_add_interface(local, sdata));
+
+	if (mac_diag)
+		pr_info("wlan-mac-diag: change-mac name=%s branch=complete live=%d err=%d final=%pM zero=%d\n",
+			sdata->name, live, ret, sdata->dev->dev_addr,
+			is_zero_ether_addr(sdata->dev->dev_addr));
 
 	return ret;
 }
@@ -2133,9 +2154,11 @@ int ieee80211_if_change_type(struct ieee80211_sub_if_data *sdata,
 }
 
 static void ieee80211_assign_perm_addr(struct ieee80211_local *local,
-				       u8 *perm_addr, enum nl80211_iftype type)
+				       u8 *perm_addr, enum nl80211_iftype type,
+				       const char *name)
 {
 	struct ieee80211_sub_if_data *sdata;
+	bool mac_diag = !strcmp(name, "wlan0") || !strcmp(name, "wlan1");
 	u64 mask, start, addr, val, inc;
 	u8 *m;
 	u8 tmp_addr[ETH_ALEN];
@@ -2147,8 +2170,14 @@ static void ieee80211_assign_perm_addr(struct ieee80211_local *local,
 	memcpy(perm_addr, local->hw.wiphy->perm_addr, ETH_ALEN);
 
 	if (is_zero_ether_addr(local->hw.wiphy->addr_mask) &&
-	    local->hw.wiphy->n_addresses <= 1)
+	    local->hw.wiphy->n_addresses <= 1) {
+		if (mac_diag)
+			pr_info("wlan-mac-diag: assign name=%s source=default mac=%pM valid=%d zero=%d n=%d\n",
+				name, perm_addr, is_valid_ether_addr(perm_addr),
+				is_zero_ether_addr(perm_addr),
+				local->hw.wiphy->n_addresses);
 		return;
+	}
 
 	switch (type) {
 	case NL80211_IFTYPE_MONITOR:
@@ -2194,13 +2223,24 @@ static void ieee80211_assign_perm_addr(struct ieee80211_local *local,
 				memcpy(perm_addr,
 				       local->hw.wiphy->addresses[i].addr,
 				       ETH_ALEN);
+				if (mac_diag)
+					pr_info("wlan-mac-diag: assign name=%s source=pool index=%d mac=%pM valid=%d zero=%d\n",
+						name, i, perm_addr,
+						is_valid_ether_addr(perm_addr),
+						is_zero_ether_addr(perm_addr));
 				break;
 			}
 		}
 
 		/* try mask if available */
-		if (is_zero_ether_addr(local->hw.wiphy->addr_mask))
+		if (is_zero_ether_addr(local->hw.wiphy->addr_mask)) {
+			if (mac_diag)
+				pr_info("wlan-mac-diag: assign name=%s source=no-mask mac=%pM valid=%d zero=%d\n",
+					name, perm_addr,
+					is_valid_ether_addr(perm_addr),
+					is_zero_ether_addr(perm_addr));
 			break;
+		}
 
 		m = local->hw.wiphy->addr_mask;
 		mask =	((u64)m[0] << 5*8) | ((u64)m[1] << 4*8) |
@@ -2210,6 +2250,10 @@ static void ieee80211_assign_perm_addr(struct ieee80211_local *local,
 		if (__ffs64(mask) + hweight64(mask) != fls64(mask)) {
 			/* not a contiguous mask ... not handled now! */
 			pr_info("not contiguous\n");
+			if (mac_diag)
+				pr_err("wlan-mac-diag: assign name=%s source=bad-mask mask=%pM mac=%pM zero=%d\n",
+				       name, local->hw.wiphy->addr_mask,
+				       perm_addr, is_zero_ether_addr(perm_addr));
 			break;
 		}
 
@@ -2252,6 +2296,11 @@ static void ieee80211_assign_perm_addr(struct ieee80211_local *local,
 
 			if (!used) {
 				memcpy(perm_addr, tmp_addr, ETH_ALEN);
+				if (mac_diag)
+					pr_info("wlan-mac-diag: assign name=%s source=mask mac=%pM valid=%d zero=%d\n",
+						name, perm_addr,
+						is_valid_ether_addr(perm_addr),
+						is_zero_ether_addr(perm_addr));
 				break;
 			}
 			addr = (start & ~mask) | (val & mask);
@@ -2291,12 +2340,10 @@ int ieee80211_if_add(struct ieee80211_local *local, const char *name,
 
 		sdata->dev = NULL;
 		strscpy(sdata->name, name, IFNAMSIZ);
-
 		if (is_valid_ether_addr(params->macaddr))
 			memcpy(wdev->address, params->macaddr, ETH_ALEN);
 		else
-			ieee80211_assign_perm_addr(local, wdev->address, type);
-
+			ieee80211_assign_perm_addr(local, wdev->address, type, name);
 		memcpy(sdata->vif.addr, wdev->address, ETH_ALEN);
 		ether_addr_copy(sdata->vif.bss_conf.addr, sdata->vif.addr);
 
@@ -2345,11 +2392,20 @@ int ieee80211_if_add(struct ieee80211_local *local, const char *name,
 			return ret;
 		}
 
-		ieee80211_assign_perm_addr(local, ndev->perm_addr, type);
+		ieee80211_assign_perm_addr(local, ndev->perm_addr, type, ndev->name);
 		if (is_valid_ether_addr(params->macaddr))
 			eth_hw_addr_set(ndev, params->macaddr);
 		else
 			eth_hw_addr_set(ndev, ndev->perm_addr);
+		if (!strcmp(ndev->name, "wlan0") ||
+		    !strcmp(ndev->name, "wlan1"))
+			pr_info("wlan-mac-diag: if-add name=%s source=%s perm=%pM mac=%pM valid=%d zero=%d\n",
+				ndev->name,
+				is_valid_ether_addr(params->macaddr) ?
+				"requested-mac" : "permanent-mac",
+				ndev->perm_addr, ndev->dev_addr,
+				is_valid_ether_addr(ndev->dev_addr),
+				is_zero_ether_addr(ndev->dev_addr));
 		SET_NETDEV_DEV(ndev, wiphy_dev(local->hw.wiphy));
 
 		/* don't use IEEE80211_DEV_TO_SUB_IF -- it checks too much */

@@ -1765,9 +1765,17 @@ int cfg80211_register_netdevice(struct net_device *dev)
 {
 	struct wireless_dev *wdev = dev->ieee80211_ptr;
 	struct cfg80211_registered_device *rdev;
+	bool mac_diag = !strcmp(dev->name, "wlan0") ||
+			!strcmp(dev->name, "wlan1");
 	int ret;
 
 	ASSERT_RTNL();
+
+	if (mac_diag)
+		pr_info("wlan-mac-diag: register name=%s state=entry mac=%pM perm=%pM zero=%d assign=%u\n",
+			dev->name, dev->dev_addr, dev->perm_addr,
+			is_zero_ether_addr(dev->dev_addr),
+			(unsigned int)dev->addr_assign_type);
 
 	if (WARN_ON(!wdev))
 		return -EINVAL;
@@ -1780,10 +1788,19 @@ int cfg80211_register_netdevice(struct net_device *dev)
 	wdev->registered = true;
 	wdev->registering = true;
 	ret = register_netdevice(dev);
-	if (ret)
+	if (ret) {
+		if (mac_diag)
+			pr_err("wlan-mac-diag: register name=%s state=failed err=%d mac=%pM zero=%d\n",
+			       dev->name, ret, dev->dev_addr,
+			       is_zero_ether_addr(dev->dev_addr));
 		goto out;
+	}
 
 	cfg80211_register_wdev(rdev, wdev);
+	if (mac_diag)
+		pr_info("wlan-mac-diag: register name=%s state=success type=%d mac=%pM perm=%pM zero=%d\n",
+			dev->name, wdev->iftype, dev->dev_addr, dev->perm_addr,
+			is_zero_ether_addr(dev->dev_addr));
 	ret = 0;
 out:
 	wdev->registering = false;
